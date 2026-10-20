@@ -74,12 +74,15 @@ public class CorpseTests
     }
 
     [Fact]
-    public void The_gem_allows_one_spectre_and_the_passives_add_to_it()
+    public void The_gem_sets_the_spectre_limit_and_the_passives_add_to_it()
     {
-        Assert.Equal(1, Spectres.Limit(0));
-        Assert.Equal(2, Spectres.Limit(1));
-        Assert.Equal(3, Spectres.Limit(2));
-        // A negative source (a curse, a wrong stat) never takes the gem's own one away.
-        Assert.Equal(1, Spectres.Limit(-1));
+        // base_number_of_spectres_allowed: 1 at gem level 1, 2 from level 13.
+        Assert.Equal(1, Spectres.Limit(1, 0));
+        Assert.Equal(2, Spectres.Limit(2, 0));
+        Assert.Equal(2, Spectres.Limit(1, 1));
+        Assert.Equal(3, Spectres.Limit(2, 1));
+        // A gem stat of 0 (or a negative passive) never drops the gem's own one.
+        Assert.Equal(1, Spectres.Limit(0, 0));
+        Assert.Equal(1, Spectres.Limit(1, -1));
     }
 }

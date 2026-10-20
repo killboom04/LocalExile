@@ -71,9 +71,16 @@ sealed class CorpseBook
     }
 }
 
-/// <summary>Raise Spectre's limits (issue #90): the gem allows one spectre, and the passive tree's
-/// <c>number_of_spectres_allowed</c> adds to it.</summary>
+/// <summary>
+/// Raise Spectre's limits (issue #90, wiki: Raise Spectre). The gem itself allows one spectre at level 1 and two from
+/// level 13 (<c>base_number_of_spectres_allowed</c>), and the passive tree's <c>number_of_spectres_allowed</c> adds to it.
+/// </summary>
 static class Spectres
 {
-    public static int Limit(int additional) => Math.Max(1, 1 + additional);
+    /// <summary>How far a spectre will leave the player before it follows (the game's minion AI is not modelled).</summary>
+    public const int FollowRange = 20;
+    /// <summary>How far a spectre looks for a hostile monster to fight.</summary>
+    public const int AggroRange = 40;
+
+    public static int Limit(int fromGem, int fromPassives) => Math.Max(1, Math.Max(fromGem, 0) + fromPassives);
 }

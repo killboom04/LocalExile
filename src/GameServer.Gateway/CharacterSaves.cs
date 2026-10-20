@@ -21,6 +21,9 @@ static class CharacterSaves
 
     public sealed record SavedPlacement(uint Id, byte X, byte Y, SavedItem Item);
 
+    /// <summary>A raised spectre (issue #90): the MonsterVarieties row it was raised from and the level the gem gave it.</summary>
+    public sealed record SavedSpectre(int VarietyRow, byte Level);
+
     /// <summary>Skill bar: slot index → a GrantedEffects Id (skill ids change with the socketed gems, effects do not),
     /// "Action/&lt;ActionTypes Id&gt;" for a basic action ("Action/Move") or "" for a cleared slot. Experience: the
     /// character's total (its level is the account's; a save from another level is ignored). Passives: the allocated
@@ -30,7 +33,8 @@ static class CharacterSaves
     public sealed record Save(Dictionary<byte, List<SavedPlacement>> Inventories, Dictionary<int, string>? SkillBar = null,
         uint? Experience = null, List<ushort>? Passives = null, List<string>? Waypoints = null, List<string>? Visited = null,
         List<string>? QuestFlags = null, ushort? ExtraPassivePoints = null,
-        Dictionary<ushort, ushort>? MasteryEffects = null, uint? Gold = null, ushort? RefundPoints = null);
+        Dictionary<ushort, ushort>? MasteryEffects = null, uint? Gold = null, ushort? RefundPoints = null,
+        List<SavedSpectre>? Spectres = null);
 
     static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };
     static readonly Lock Gate = new();
@@ -84,6 +88,10 @@ static class CharacterSaves
 
     /// <summary>Records the character's experience, keeping the rest of the save.</summary>
     public static void SetExperience(string character, uint experience) => Update(character, s => s with { Experience = experience });
+
+    /// <summary>Records the character's raised spectres (issue #90): the game's gem keeps them across logouts.</summary>
+    public static void SetSpectres(string character, IEnumerable<SavedSpectre> spectres) =>
+        Update(character, s => s with { Spectres = [.. spectres] });
 
     /// <summary>Records the character's quest flags (QuestFlags.dat Ids), keeping the rest of the save.</summary>
     public static void SetQuestFlags(string character, IEnumerable<string> flags) => Update(character, s => s with { QuestFlags = [.. flags.Order()] });

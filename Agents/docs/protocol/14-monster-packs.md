@@ -91,19 +91,29 @@ A monster that dies leaves a corpse: its object stays in the area for `CorpseBoo
 row, level, rarity, label, where it fell and when it goes. The book is the corpse's identity; nothing else in the
 connection's monster state is reused, so a corpse never resumes acting.
 
-Raise Spectre (`CastGemSkill`, effect id `RaiseSpectre`) is the first corpse-targeting skill. Cast on a corpse it pays
-the skill's mana, removes the corpse's object (0x02bb) and creates a **friendly** monster of that variety and level in
-its place (team 0, `SpawnMonster` with `friendly: true`), remembering the id in `ClientState.SpectreIds`. One corpse
-feeds one minion, and the count is capped at `Spectres.Limit`: one, plus the passives' `number_of_spectres_allowed` —
-a cast over the cap leaves the corpse where it is and logs it. A live monster is not a corpse, so clicking one logs
-`no corpse there`.
+Raise Spectre (`CastGemSkill`, effect id `RaiseSpectre`) is the first corpse-targeting skill, and **the gem decides the
+minion** (wiki: Raise Spectre). Cast on a corpse it pays the skill's mana, removes the corpse's object (0x02bb) and
+creates a friendly monster (team 0) in its place:
 
-Live 2026-10-20 (offline so far): the corpse and limit paths are covered by `CorpseTests`; the client side — whether a
-click on a corpse object reaches C→S 0x24 with the corpse's id — is not yet confirmed. `/raise [id]` (no id: the
-nearest corpse) and `/spectres` make the whole loop testable in the client's chat either way.
+- **Level** from the gem's `raised_spectre_level` — 28 at gem level 1, 70 at level 20. The corpse's own level does not
+  matter, and the raised spectre is Normal: the game's spectres keep none of the corpse's rarity or mod properties.
+- **Count** from the gem's `base_number_of_spectres_allowed` (1 at level 1, 2 from level 13) plus the passives'
+  `number_of_spectres_allowed`. A cast over the cap leaves the corpse where it is and logs it; a live monster is not a
+  corpse, so clicking one logs `no corpse there`.
+- **Behaviour** (`RunMonsterAi`): a friendly monster is a spectre. It goes for the nearest hostile monster within
+  `Spectres.AggroRange` (40 cells), attacks it in reach with the variety's own attack, and otherwise follows the player
+  beyond `Spectres.FollowRange` (20 cells). A spectre's kills run through `MonsterKilled`, so the player gets the
+  experience and the drops.
+- **Persistence**: raised spectres are saved with the character (`CharacterSaves.SavedSpectre`: variety row and gem
+  level) and raised again beside the player on login and after an area change, which is the gem's promise.
 
-Not done: a raised spectre does not follow the player or fight yet (it stands where it was raised), nothing persists
-across a logout or an area change, and the character's death does not drop them.
+Live 2026-10-20: the gem's stats were read in the client's log — `raised_spectre_level 28`,
+`base_number_of_spectres_allowed 1`, `minion_elemental_resistance_% 30`, `active_skill_minion_movement_velocity_+%_final
+55` — and `/raise` consumed a corpse. `/raise [id]` (no id: the nearest corpse) and `/spectres` make the loop testable
+from chat while the client's own corpse targeting (hold A, wiki: Corpse) is unconfirmed.
+
+Not modelled: the gem's minion stats (+30% elemental resistances, 55% more movement speed — monsters have no
+resistance model here), support gems, the death-to-orb-spectre revive, and the spectre bank / `Desecrate`.
 
 ## 5. Open
 

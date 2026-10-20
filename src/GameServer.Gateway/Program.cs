@@ -481,6 +481,7 @@ static async Task OnClientMessages(string remote, NetworkStream stream, Connecti
                 await SpawnTownNpcs(remote, stream, ciphers, conn);
                 await SpawnTownStash(remote, stream, ciphers, conn);
                 await SpawnHideoutDoodads(remote, stream, ciphers, conn);
+                await RestoreSpectres(remote, stream, ciphers, conn);
                 _ = RunMonsterAi(remote, stream, ciphers, conn);
                 _ = RunPlayerTick(remote, stream, ciphers, conn);
             }
@@ -1268,27 +1269,31 @@ static async Task CastGemSkill(string remote, NetworkStream stream, ConnectionCi
                 $"0x01b1 player mana {conn.PlayerMana} (-{cost} for {gem.Name})");
     }
     if (gem.Name is not null && Skills.EffectId(gem.Effect) == "RaiseSpectre")
-        await RaiseSpectre(remote, stream, ciphers, conn, skillId, targetId);
+        await RaiseSpectre(remote, stream, ciphers, conn, skillId, gem.Effect, targetId);
     else if (gem.Name is not null && IsRighteousFire(gem.Effect))
         await ActivateRighteousFire(remote, stream, ciphers, conn, skillId, gem.Effect);
     else
         await LaunchProjectile(remote, stream, ciphers, conn, skillId, from, to, targetId);
 }
 
-// Raise Spectre (issue #90): a corpse-targeting gem skill. The corpse's object is removed and a friendly monster of the
-// same variety and level takes its place; the character keeps the ids (ClientState.SpectreIds) so /spectres lists them
-// and the behaviour pass can drive them. One corpse, one minion, up to the limit Spectres.Limit gives.
+// Raise Spectre (issue #90), as the game defines it: the **gem** decides the minion. `raised_spectre_level` (28 at gem
+// level 1) is the spectre's level — the corpse's own level does not matter — and `base_number_of_spectres_allowed` (1 at
+// level 1, 2 from level 13) plus the passives' number_of_spectres_allowed is how many the character may keep. The
+// corpse is consumed: its object goes before the minion appears, and a raised spectre never keeps the corpse's rarity or
+// mods, so it is raised Normal.
 static async Task RaiseSpectre(string remote, NetworkStream stream, ConnectionCiphers ciphers, ClientState conn,
-    ushort skillId, uint targetId)
+    ushort skillId, int effect, uint targetId)
 {
     double now = conn.Clock.Elapsed.TotalSeconds;
+    int limit = SpectreLimit(conn, effect);
+    byte level = RaisedSpectreLevel(effect);
     CorpseBook.Corpse? corpse;
-    int have, limit = SpectreLimit(conn);
+    int have;
     lock (conn.Monsters)
     {
         corpse = conn.Corpses.Take(targetId, now);
-        conn.SpectreIds.RemoveAll(id => !conn.Monsters.TryGetValue(id, out var s) || s.Dead);
-        have = conn.SpectreIds.Count;
+        conn.Spectres.RemoveAll(s => !conn.Monsters.TryGetValue(s.Id, out var m) || m.Dead);
+        have = conn.Spectres.Count;
     }
     if (corpse is null)
     {
@@ -1305,19 +1310,65 @@ static async Task RaiseSpectre(string remote, NetworkStream stream, ConnectionCi
     // The corpse is spent before the minion appears, so the client never shows both.
     lock (conn.Monsters) conn.Monsters.Remove(corpse.Id);
     await Send(remote, stream, ciphers, InstanceProtocol.RemoveObject(corpse.Id), $"0x02bb remove corpse 0x{corpse.Id:x} (raised)");
-    uint id = await SpawnMonster(remote, stream, ciphers, conn, corpse.Variety, corpse.Level, corpse.Rarity,
+    uint id = await SpawnMonster(remote, stream, ciphers, conn, corpse.Variety, level, MonsterRarity.Normal,
         corpse.X, corpse.Y, corpse.Variety.Name, friendly: true);
-    lock (conn.Monsters) conn.SpectreIds.Add(id);
-    Console.WriteLine($"[gateway] {remote} raised spectre 0x{id:x} {corpse.Variety.Name}@{corpse.Level} " +
-        $"from corpse 0x{corpse.Id:x} ({have + 1}/{limit})");
+    lock (conn.Monsters) conn.Spectres.Add(new ClientState.Spectre(id, corpse.Variety.Row, level));
+    SaveSpectres(conn);
+    Console.WriteLine($"[gateway] {remote} raised spectre 0x{id:x} {corpse.Variety.Name}@{level} " +
+        $"from corpse 0x{corpse.Id:x} ({have + 1}/{limit}, gem level 1 raises level {level} spectres)");
 }
 
-// Raise Spectre's limit: one, plus the passive tree's number_of_spectres_allowed (Spectres.Limit).
-static int SpectreLimit(ClientState conn)
+// Raise Spectre's limit, from the gem and the passives (Spectres.Limit).
+static int SpectreLimit(ClientState conn, int effect)
 {
+    var gemStats = Skills.EffectStats(effect, 1).ToDictionary(s => s.Item1, s => s.Item2);
+    int fromGem = Stats.Key("base_number_of_spectres_allowed") is uint g ? gemStats.GetValueOrDefault(g) : 0;
     var stats = CharacterPlayerStats(conn);
-    int Get(string name) => Stats.Key(name) is uint k ? stats.GetValueOrDefault(k) : 0;
-    return Spectres.Limit(Get("number_of_spectres_allowed") + Get("base_number_of_spectres_allowed"));
+    int fromPassives = Stats.Key("number_of_spectres_allowed") is uint p ? stats.GetValueOrDefault(p) : 0;
+    return Spectres.Limit(fromGem, fromPassives);
+}
+
+// The level a Raise Spectre raises at: the gem's raised_spectre_level (28 at gem level 1, 70 at 20).
+static byte RaisedSpectreLevel(int effect)
+{
+    var gemStats = Skills.EffectStats(effect, 1).ToDictionary(s => s.Item1, s => s.Item2);
+    int level = Stats.Key("raised_spectre_level") is uint k ? gemStats.GetValueOrDefault(k) : 0;
+    return (byte)Math.Clamp(level <= 0 ? 1 : level, 1, 100);
+}
+
+// Spectres are saved with the character: the game's gem keeps them across a logout, a crash and an area change.
+static void SaveSpectres(ClientState conn)
+{
+    if (conn.Character is not { } character) return;
+    List<CharacterSaves.SavedSpectre> saved;
+    lock (conn.Monsters) saved = [.. conn.Spectres.Select(s => new CharacterSaves.SavedSpectre(s.VarietyRow, s.Level))];
+    CharacterSaves.SetSpectres(character, saved);
+}
+
+// Raises the character's saved spectres again beside the player, at the level the gem gave them.
+static async Task RestoreSpectres(string remote, NetworkStream stream, ConnectionCiphers ciphers, ClientState conn)
+{
+    if (conn.Character is not { } character) return;
+    if (CharacterSaves.Load(character)?.Spectres is not { Count: > 0 } saved) return;
+    double now = conn.Clock.Elapsed.TotalSeconds;
+    var (px, py) = conn.Walk.Position(now);
+    foreach (var s in saved)
+    {
+        if (Monsters.Find(s.VarietyRow.ToString()) is not { } variety) continue;
+        int x = px, y = py;
+        for (int ring = 0; ring < 8; ring++)
+        {
+            double angle = Math.Tau * ring / 8;
+            int cx = px + (int)Math.Round(Math.Cos(angle) * 3), cy = py + (int)Math.Round(Math.Sin(angle) * 3);
+            if (conn.Layout.Walkable is { } walk && !walk(cx, cy)) continue;
+            (x, y) = (cx, cy);
+            break;
+        }
+        uint id = await SpawnMonster(remote, stream, ciphers, conn, variety, s.Level, MonsterRarity.Normal, x, y,
+            variety.Name, friendly: true);
+        lock (conn.Monsters) conn.Spectres.Add(new ClientState.Spectre(id, s.VarietyRow, s.Level));
+        Console.WriteLine($"[gateway] {remote} spectre 0x{id:x} {variety.Name}@{s.Level} raised again at ({x}, {y})");
+    }
 }
 
 // Aura skills toggle: the first cast reserves their mana and puts their buff on the player, the next cast turns them
@@ -3176,16 +3227,17 @@ static ChatCommands Commands(string remote, NetworkStream stream, ConnectionCiph
                 ? conn.Corpses.Get(id, at)
                 : conn.Corpses.Nearest(px, py, at);
         if (corpse is null) { await conn.Commands!.Reply("No corpse to raise."); return; }
-        await RaiseSpectre(remote, stream, ciphers, conn, 0, corpse.Id);
+        await RaiseSpectre(remote, stream, ciphers, conn, 0, Skills.EffectRow("RaiseSpectre"), corpse.Id);
     })
     .Add("spectres", "/spectres (the spectres this character has raised)", async _ =>
     {
         List<string> lines = [];
         lock (conn.Monsters)
         {
-            conn.SpectreIds.RemoveAll(id => !conn.Monsters.TryGetValue(id, out var s) || s.Dead);
-            foreach (uint id in conn.SpectreIds)
-                if (conn.Monsters.TryGetValue(id, out var s)) lines.Add($"0x{id:x} {s.Label} life {s.Life}/{s.MaxLife}");
+            conn.Spectres.RemoveAll(s => !conn.Monsters.TryGetValue(s.Id, out var m) || m.Dead);
+            foreach (var s in conn.Spectres)
+                if (conn.Monsters.TryGetValue(s.Id, out var m))
+                    lines.Add($"0x{s.Id:x} {m.Label} life {m.Life}/{m.MaxLife}");
         }
         await conn.Commands!.Reply(lines.Count == 0 ? "No spectres." : $"{lines.Count}: {string.Join("; ", lines)}");
     })
@@ -3403,6 +3455,7 @@ static async Task RunMonsterAi(string remote, NetworkStream stream, ConnectionCi
             if (!conn.AiEnabled) continue;
             var orders = new List<(uint Id, (int X, int Y) From, (int X, int Y) To, string Why)>();
             var swings = new List<(uint Id, SpawnedMonster M, (int X, int Y) From)>();
+            var spectreSwings = new List<(uint Id, SpawnedMonster M, (int X, int Y) From, uint TargetId, SpawnedMonster Target)>();
             double now = conn.Clock.Elapsed.TotalSeconds;
             var (px, py) = conn.Walk.Position(now);
             lock (conn.Monsters)
@@ -3412,6 +3465,46 @@ static async Task RunMonsterAi(string remote, NetworkStream stream, ConnectionCi
                     if (m.Dead) continue;
                     var (mx, my) = m.Walk.Position(now);
                     double d = Math.Sqrt((double)(mx - px) * (mx - px) + (double)(my - py) * (my - py));
+                    // A spectre (issue #90) fights for the player: it goes for the nearest hostile monster in range and
+                    // otherwise keeps near the player. It never swings at the player, and hostile monsters ignore it
+                    // because their AI only ever targets the player.
+                    if (!m.Hostile)
+                    {
+                        if (now < m.BusyUntil || m.Attack is not { } own) continue;
+                        (uint Id, SpawnedMonster M, (int X, int Y) At, double D)? foe = null;
+                        foreach (var (oid, om) in conn.Monsters)
+                        {
+                            if (om.Dead || !om.Hostile) continue;
+                            var (ox, oy) = om.Walk.Position(now);
+                            double od = Dist((mx, my), (ox, oy));
+                            if (od > Spectres.AggroRange || (foe is { } seen && od >= seen.D)) continue;
+                            foe = (oid, om, (ox, oy), od);
+                        }
+                        if (foe is { } target)
+                        {
+                            if (target.D <= own.Range + 1)
+                            {
+                                m.BusyUntil = now + own.Seconds;
+                                m.LastTarget = null;
+                                m.Walk.Order(mx, my, now);
+                                spectreSwings.Add((id, m, (mx, my), target.Id, target.M));
+                                continue;
+                            }
+                            if (m.LastTarget is { } chase && Math.Abs(chase.X - target.At.X) + Math.Abs(chase.Y - target.At.Y) < 3) continue;
+                            m.LastTarget = target.At;
+                            orders.Add((id, m.Walk.Order(target.At.X, target.At.Y, now), target.At,
+                                $"spectre chases 0x{target.Id:x} (distance {target.D:F0})"));
+                            continue;
+                        }
+                        if (d <= Spectres.FollowRange) continue;
+                        double back = Spectres.FollowRange * 0.6 / d;
+                        (int X, int Y) tail = ((int)Math.Round(px + (mx - px) * back), (int)Math.Round(py + (my - py) * back));
+                        if (conn.Layout.Walkable is { } follows && !follows(tail.X, tail.Y)) tail = (px, py);
+                        if (m.LastTarget is { } followed && Math.Abs(followed.X - tail.X) + Math.Abs(followed.Y - tail.Y) < 3) continue;
+                        m.LastTarget = tail;
+                        orders.Add((id, m.Walk.Order(tail.X, tail.Y, now), tail, $"spectre follows (distance {d:F0})"));
+                        continue;
+                    }
                     if (!m.Aggro && d <= m.AggroRange) { m.Aggro = true; m.LastTarget = null; }
                     else if (m.Aggro && d > 2 * m.AggroRange)
                     {
@@ -3444,12 +3537,44 @@ static async Task RunMonsterAi(string remote, NetworkStream stream, ConnectionCi
                     $"0x01ab monster 0x{id:x} {why}: move from {from} to {to}");
             foreach (var (id, m, from) in swings)
                 _ = MonsterSwing(remote, stream, ciphers, conn, id, m, from, (px, py));
+            foreach (var (id, m, from, targetId, target) in spectreSwings)
+                _ = SpectreSwing(remote, stream, ciphers, conn, id, m, from, targetId, target);
         }
     }
     catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
     {
         // The connection closed while sending.
     }
+}
+
+// A spectre's swing at a hostile monster (issue #90): the action aimed at it, then at the contact point the monster's
+// life goes down by the minion's attack (0x1b1). A killing blow goes through MonsterKilled, so the player gets the
+// experience and the drops and the corpse stays a corpse another skill could use.
+static async Task SpectreSwing(string remote, NetworkStream stream, ConnectionCiphers ciphers, ClientState conn, uint id,
+    SpawnedMonster m, (int X, int Y) from, uint targetId, SpawnedMonster target)
+{
+    var a = m.Attack!;
+    double now = conn.Clock.Elapsed.TotalSeconds;
+    var (tx, ty) = target.Walk.Position(now);
+    await Send(remote, stream, ciphers,
+        InstanceProtocol.ActionStarted(id, from.X, from.Y, tx, ty, a.SkillId, 0xffff, 0x0408, targetObjectId: targetId),
+        $"0x01ab spectre 0x{id:x} ({m.Label}) attacks 0x{targetId:x} ({target.Label}), attack time {a.Seconds:0.00} s");
+    await Task.Delay(TimeSpan.FromSeconds(a.Seconds / 2));
+    uint life;
+    int damage = 0;
+    lock (conn.Monsters)
+    {
+        if (m.Dead || target.Dead || target.Life == 0 || conn.Closed) return;
+        now = conn.Clock.Elapsed.TotalSeconds;
+        if (Dist(m.Walk.Position(now), target.Walk.Position(now)) > a.Range + 2) return;
+        damage = Math.Max(1, a.Damage.RollTotal(Random.Shared));
+        target.Life = (uint)Math.Max(0, (long)target.Life - damage);
+        life = target.Life;
+        if (life == 0) { target.Aggro = false; target.Dead = true; }
+    }
+    await Send(remote, stream, ciphers, InstanceProtocol.LifeUpdate(targetId, life),
+        $"0x01b1 monster 0x{targetId:x} hit for {damage} by spectre 0x{id:x}, life {life}/{target.MaxLife}{(life == 0 ? " (dies)" : "")}");
+    if (life == 0) await MonsterKilled(remote, stream, ciphers, conn, targetId, target);
 }
 
 // A monster swings at the player: its skill as an action aimed at the player (0x1ab, flags | 0x80 + target id, sequence
@@ -4916,8 +5041,10 @@ sealed class ClientState(AreaLayout layout, uint ticket, uint seed)
     public readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
     /// <summary>The area's corpses (issue #90): what Raise Spectre can use.</summary>
     public readonly CorpseBook Corpses = new();
-    /// <summary>The spectres this character has raised (object ids), in the order they were raised.</summary>
-    public readonly List<uint> SpectreIds = [];
+    /// <summary>The spectres this character has raised, in the order they were raised (issue #90).</summary>
+    public readonly List<Spectre> Spectres = [];
+    /// <summary>One raised spectre: the object id being drawn, what it was raised from and the level the gem gave it.</summary>
+    public sealed record Spectre(uint Id, int VarietyRow, byte Level);
     // Server-side estimate of the client-predicted walk (reported in each 0x1ab), kept on walkable cells.
     public WalkEstimator Walk { get; private set; } = NewWalk(layout);
 
