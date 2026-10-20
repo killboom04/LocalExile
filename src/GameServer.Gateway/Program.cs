@@ -1350,6 +1350,12 @@ static async Task RestoreSpectres(string remote, NetworkStream stream, Connectio
 {
     if (conn.Character is not { } character) return;
     if (CharacterSaves.Load(character)?.Spectres is not { Count: > 0 } saved) return;
+    // Already raised in this session (an area change keeps them): nothing to do.
+    lock (conn.Monsters)
+    {
+        conn.Spectres.RemoveAll(s => !conn.Monsters.TryGetValue(s.Id, out var m) || m.Dead);
+        if (conn.Spectres.Count > 0) return;
+    }
     double now = conn.Clock.Elapsed.TotalSeconds;
     var (px, py) = conn.Walk.Position(now);
     foreach (var s in saved)
