@@ -107,10 +107,14 @@ creates a friendly monster (team 0) in its place:
 - **Persistence**: raised spectres are saved with the character (`CharacterSaves.SavedSpectre`: variety row and gem
   level) and raised again beside the player on login and after an area change, which is the gem's promise.
 
+There is **no raise command**: the skill is used the way the client uses any gem skill, from its bar, aimed at a corpse
+(hold A to target corpses, wiki: Corpse). The 0x24 click arrives with the corpse's object id, which is the raise's
+target; a cast that arrives as a point instead (0x25) uses the nearest corpse within `Spectres.RaiseReach` (6 cells) of
+the aimed cell, so both client paths raise. `/spectres` only lists what the character has.
+
 Live 2026-10-20: the gem's stats were read in the client's log — `raised_spectre_level 28`,
 `base_number_of_spectres_allowed 1`, `minion_elemental_resistance_% 30`, `active_skill_minion_movement_velocity_+%_final
-55` — and `/raise` consumed a corpse. `/raise [id]` (no id: the nearest corpse) and `/spectres` make the loop testable
-from chat while the client's own corpse targeting (hold A, wiki: Corpse) is unconfirmed.
+55`. The gem's cast on a corpse is not yet confirmed live; the client's corpse targeting (hold A) is the open question.
 
 Not modelled: the gem's minion stats (+30% elemental resistances, 55% more movement speed — monsters have no
 resistance model here), support gems, the death-to-orb-spectre revive, and the spectre bank / `Desecrate`.

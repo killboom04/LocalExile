@@ -1269,7 +1269,7 @@ static async Task CastGemSkill(string remote, NetworkStream stream, ConnectionCi
                 $"0x01b1 player mana {conn.PlayerMana} (-{cost} for {gem.Name})");
     }
     if (gem.Name is not null && Skills.EffectId(gem.Effect) == "RaiseSpectre")
-        await RaiseSpectre(remote, stream, ciphers, conn, skillId, gem.Effect, targetId);
+        await RaiseSpectre(remote, stream, ciphers, conn, skillId, gem.Effect, targetId, to);
     else if (gem.Name is not null && IsRighteousFire(gem.Effect))
         await ActivateRighteousFire(remote, stream, ciphers, conn, skillId, gem.Effect);
     else
@@ -1282,7 +1282,7 @@ static async Task CastGemSkill(string remote, NetworkStream stream, ConnectionCi
 // corpse is consumed: its object goes before the minion appears, and a raised spectre never keeps the corpse's rarity or
 // mods, so it is raised Normal.
 static async Task RaiseSpectre(string remote, NetworkStream stream, ConnectionCiphers ciphers, ClientState conn,
-    ushort skillId, int effect, uint targetId)
+    ushort skillId, int effect, uint targetId, (int X, int Y) at)
 {
     double now = conn.Clock.Elapsed.TotalSeconds;
     int limit = SpectreLimit(conn, effect);
@@ -1291,13 +1291,22 @@ static async Task RaiseSpectre(string remote, NetworkStream stream, ConnectionCi
     int have;
     lock (conn.Monsters)
     {
-        corpse = conn.Corpses.Take(targetId, now);
+        // Clicked on a corpse: that one. Cast at a point (the client does that when the corpse is not the click's
+        // direct target): the nearest corpse to where the cast was aimed.
+        corpse = targetId != 0 ? conn.Corpses.Take(targetId, now) : null;
+        if (corpse is null)
+        {
+            var nearest = conn.Corpses.Nearest(at.X, at.Y, now);
+            if (nearest is not null && Math.Abs(nearest.X - at.X) + Math.Abs(nearest.Y - at.Y) <= Spectres.RaiseReach)
+                corpse = conn.Corpses.Take(nearest.Id, now);
+        }
         conn.Spectres.RemoveAll(s => !conn.Monsters.TryGetValue(s.Id, out var m) || m.Dead);
         have = conn.Spectres.Count;
     }
     if (corpse is null)
     {
-        Console.WriteLine($"[gateway] {remote} skill 0x{skillId:x4} Raise Spectre on 0x{targetId:x}: no corpse there");
+        Console.WriteLine($"[gateway] {remote} skill 0x{skillId:x4} Raise Spectre at ({at.X}, {at.Y})" +
+            (targetId != 0 ? $" on 0x{targetId:x}" : "") + $": no corpse there");
         return;
     }
     if (have >= limit)
@@ -1318,22 +1327,29 @@ static async Task RaiseSpectre(string remote, NetworkStream stream, ConnectionCi
         $"from corpse 0x{corpse.Id:x} ({have + 1}/{limit}, gem level 1 raises level {level} spectres)");
 }
 
+// A gem skill's stats by stat name, for the two stats Raise Spectre reads.
+static Dictionary<string, int> GemStats(int effect)
+{
+    var byName = new Dictionary<string, int>(StringComparer.Ordinal);
+    foreach (var (key, value) in Skills.EffectStats(effect, 1)) byName[Stats.Name(key)] = value;
+    return byName;
+}
+
 // Raise Spectre's limit, from the gem and the passives (Spectres.Limit).
 static int SpectreLimit(ClientState conn, int effect)
 {
-    var gemStats = Skills.EffectStats(effect, 1).ToDictionary(s => s.Item1, s => s.Item2);
-    int fromGem = Stats.Key("base_number_of_spectres_allowed") is uint g ? gemStats.GetValueOrDefault(g) : 0;
+    var gem = GemStats(effect);
     var stats = CharacterPlayerStats(conn);
-    int fromPassives = Stats.Key("number_of_spectres_allowed") is uint p ? stats.GetValueOrDefault(p) : 0;
-    return Spectres.Limit(fromGem, fromPassives);
+    return Spectres.Limit(
+        name => gem.GetValueOrDefault(name),
+        name => Stats.Key(name) is uint key ? stats.GetValueOrDefault(key) : 0);
 }
 
 // The level a Raise Spectre raises at: the gem's raised_spectre_level (28 at gem level 1, 70 at 20).
 static byte RaisedSpectreLevel(int effect)
 {
-    var gemStats = Skills.EffectStats(effect, 1).ToDictionary(s => s.Item1, s => s.Item2);
-    int level = Stats.Key("raised_spectre_level") is uint k ? gemStats.GetValueOrDefault(k) : 0;
-    return (byte)Math.Clamp(level <= 0 ? 1 : level, 1, 100);
+    var gem = GemStats(effect);
+    return Spectres.Level(name => gem.GetValueOrDefault(name));
 }
 
 // Spectres are saved with the character: the game's gem keeps them across a logout, a crash and an area change.
@@ -3223,19 +3239,7 @@ static ChatCommands Commands(string remote, NetworkStream stream, ConnectionCiph
         await Send(remote, stream, ciphers, InstanceEntities.StatsUpdate(PlayerId, [(StatKeys.HideMiniLifeBar, 0)]),
             "0x01b3 player hide_mini_life_bar = 0");
     })
-    .Add("raise", "/raise [object id] (dev: Raise Spectre on a corpse; no id raises the nearest)", async args =>
-    {
-        double at = conn.Clock.Elapsed.TotalSeconds;
-        var (px, py) = conn.Walk.Position(at);
-        CorpseBook.Corpse? corpse;
-        lock (conn.Monsters)
-            corpse = args.Length > 0 && uint.TryParse(args[0], out uint id)
-                ? conn.Corpses.Get(id, at)
-                : conn.Corpses.Nearest(px, py, at);
-        if (corpse is null) { await conn.Commands!.Reply("No corpse to raise."); return; }
-        await RaiseSpectre(remote, stream, ciphers, conn, 0, Skills.EffectRow("RaiseSpectre"), corpse.Id);
-    })
-    .Add("spectres", "/spectres (the spectres this character has raised)", async _ =>
+    .Add("spectres", "/spectres (the spectres this character has raised; they are raised with the gem)", async _ =>
     {
         List<string> lines = [];
         lock (conn.Monsters)

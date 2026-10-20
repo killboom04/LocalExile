@@ -4,6 +4,13 @@ namespace GameServer.Gateway.Tests;
 
 public class CorpseTests
 {
+    static string Data()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+            if (Directory.Exists(Path.Combine(dir.FullName, "data", "tables"))) return Path.Combine(dir.FullName, "data");
+        throw new DirectoryNotFoundException("data/tables");
+    }
+
     static readonly MonsterCatalog.Variety Crab =
         new(7, "Metadata/Monsters/Crab/ShoreCrab", "Shore Crab", "base", null, null);
 
@@ -84,5 +91,30 @@ public class CorpseTests
         // A gem stat of 0 (or a negative passive) never drops the gem's own one.
         Assert.Equal(1, Spectres.Limit(0, 0));
         Assert.Equal(1, Spectres.Limit(1, -1));
+    }
+
+    [Fact]
+    public void The_gem_sets_the_spectre_level_not_the_corpse()
+    {
+        Assert.Equal(28, Spectres.Level(name => name == "raised_spectre_level" ? 28 : 0));
+        Assert.Equal(70, Spectres.Level(name => name == "raised_spectre_level" ? 70 : 0));
+        Assert.Equal(1, Spectres.Level(_ => 0));
+        Assert.Equal(100, Spectres.Level(_ => 500));
+    }
+
+    [Fact]
+    public void The_raise_spectre_gem_carries_its_own_level_and_cap()
+    {
+        var stats = new StatCatalog(Data());
+        var skills = new SkillCatalog(Data());
+        int effect = skills.EffectRow("RaiseSpectre");
+        Assert.True(effect >= 0, "GrantedEffects has no RaiseSpectre");
+        Assert.Equal("RaiseSpectre", skills.EffectId(effect));
+
+        var byName = skills.EffectStats(effect, level: 1).ToDictionary(kv => stats.Name(kv.Item1), kv => kv.Item2);
+        Assert.Equal(28, byName["raised_spectre_level"]);
+        Assert.Equal(1, byName["base_number_of_spectres_allowed"]);
+        Assert.Equal(1, Spectres.Limit(name => byName.GetValueOrDefault(name), _ => 0));
+        Assert.Equal(28, Spectres.Level(name => byName.GetValueOrDefault(name)));
     }
 }

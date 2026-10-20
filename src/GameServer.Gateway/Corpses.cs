@@ -81,6 +81,24 @@ static class Spectres
     public const int FollowRange = 20;
     /// <summary>How far a spectre looks for a hostile monster to fight.</summary>
     public const int AggroRange = 40;
+    /// <summary>How far from the point a cast was aimed a corpse still counts: the client sends the point, not always
+    /// the corpse's id.</summary>
+    public const int RaiseReach = 6;
 
     public static int Limit(int fromGem, int fromPassives) => Math.Max(1, Math.Max(fromGem, 0) + fromPassives);
+
+    /// <summary>The limit from the two sources by stat name: the gem's and the character's.</summary>
+    public static int Limit(Func<string, int> gem, Func<string, int> player) =>
+        Limit(gem("base_number_of_spectres_allowed"), player("number_of_spectres_allowed"));
+
+    /// <summary>
+    /// The level a Raise Spectre raises at, from the gem's <c>raised_spectre_level</c> (28 at gem level 1): the corpse's
+    /// own level is irrelevant. A gem without the stat (or with 0) raises level 1, and the level is a byte the monster
+    /// tables accept, so it is clamped to 1..100.
+    /// </summary>
+    public static byte Level(Func<string, int> gem)
+    {
+        int level = gem("raised_spectre_level");
+        return (byte)Math.Clamp(level <= 0 ? 1 : level, 1, 100);
+    }
 }
